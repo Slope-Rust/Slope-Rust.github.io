@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Slope</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; outline: none; background: #000; }
+  #loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+             color: #0f0; font: 20px/1.4 Consolas, "Courier New", monospace; text-align: center; }
+</style>
+</head>
+<body>
+<div id="loading">SLOPE<br>loading...</div>
+<canvas id="glcanvas" tabindex="1"></canvas>
+<!-- the loader that comes with the macroquad library (drawing, input, sound) -->
+<script>var register_plugin; // (the loader's network part, which the game does not use, expects this name to exist)</script>
+<script src="mq_js_bundle.js"></script>
+<script>
+  // What the game keeps between visits (settings, high score): the browser's local storage.
+  // The game hands over text that sits in its own memory, as (address, length).
+  miniquad_add_plugin({
+    name: "slope_store",
+    version: 1,
+    register_plugin: function (importObject) {
+      const text = (at, len) => new TextDecoder().decode(new Uint8Array(wasm_memory.buffer, at, len));
+      importObject.env.slope_store_set = function (key, keyLen, value, valueLen) {
+        try { localStorage.setItem("slope:" + text(key, keyLen), text(value, valueLen)); } catch (e) {}
+      };
+      importObject.env.slope_store_get = function (key, keyLen, buf, cap) {
+        try {
+          const v = localStorage.getItem("slope:" + text(key, keyLen));
+          if (v === null) return -1;
+          const bytes = new TextEncoder().encode(v);
+          if (cap >= bytes.length) new Uint8Array(wasm_memory.buffer, buf, bytes.length).set(bytes);
+          return bytes.length;
+        } catch (e) { return -1; }
+      };
+    },
+    on_init: function () {
+      const l = document.getElementById("loading");
+      if (l) l.remove();
+    }
+  });
+  load("slope.wasm");
+</script>
+</body>
+</html>
