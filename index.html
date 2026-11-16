@@ -28,6 +28,14 @@
       importObject.env.slope_store_set = function (key, keyLen, value, valueLen) {
         try { localStorage.setItem("slope:" + text(key, keyLen), text(value, valueLen)); } catch (e) {}
       };
+      // The floor is looked at almost edge-on: without this its lines blur to a green haze a few
+      // cells away (anisotropic filtering for the texture that is bound, as the desktop game has it).
+      importObject.env.slope_texture_aniso = function (level) {
+        try {
+          const ext = gl.getExtension("EXT_texture_filter_anisotropic") || gl.getExtension("WEBKIT_EXT_texture_filter_anisotropic");
+          if (ext) gl.texParameterf(gl.TEXTURE_2D, ext.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(level, gl.getParameter(ext.MAX_TEXTURE_MAX_ANISOTROPY_EXT)));
+        } catch (e) {}
+      };
       importObject.env.slope_store_get = function (key, keyLen, buf, cap) {
         try {
           const v = localStorage.getItem("slope:" + text(key, keyLen));
