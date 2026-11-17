@@ -2,11 +2,18 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
 <title>Slope</title>
 <style>
-  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
-  canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; outline: none; background: #000; }
+  /* (a phone: the page does not scroll, bounce, zoom or select, and a held finger opens no menu) */
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; position: fixed; inset: 0;
+               overscroll-behavior: none; touch-action: none; -webkit-user-select: none; user-select: none;
+               -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; outline: none; background: #000; touch-action: none; }
   #loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
              color: #0f0; font: 20px/1.4 Consolas, "Courier New", monospace; text-align: center; }
 </style>
@@ -14,6 +21,50 @@
 <body>
 <div id="loading">SLOPE<br>loading...</div>
 <canvas id="glcanvas" tabindex="1"></canvas>
+<script>
+  // A phone or a tablet: a touch screen as the thing that is pointed with. (?touch=1 says so by hand.)
+  var slope_touch = /[?&]touch=1/.test(location.search) ||
+    ((navigator.maxTouchPoints || 0) > 0 && !!window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
+  // Phones have three or more of their own pixels to each one the page counts in. The game draws
+  // in the screen's own pixels there, so the picture is sharp, but at no more than two to one:
+  // that is sharp enough, and far less to draw. (?dpr=N says how many by hand.)
+  (function () {
+    var asked = /[?&]dpr=([\d.]+)/.exec(location.search);
+    var dpr = asked ? +asked[1] : Math.min(window.devicePixelRatio || 1, 2);
+    if (asked || dpr !== window.devicePixelRatio) {
+      try { Object.defineProperty(window, "devicePixelRatio", { get: function () { return dpr; }, configurable: true }); } catch (e) {}
+    }
+  })();
+  // The game's FULLSCREEN button: not every phone's browser can do it (an iPhone's cannot), and
+  // one that will not must not stop the game.
+  (function () {
+    var canvas = document.getElementById("glcanvas");
+    var enter = canvas.requestFullscreen || canvas.webkitRequestFullscreen;
+    canvas.requestFullscreen = function () {
+      try { var p = enter && enter.call(canvas); if (p && p.catch) p.catch(function () {}); } catch (e) {}
+    };
+    var leave = document.exitFullscreen || document.webkitExitFullscreen;
+    document.exitFullscreen = function () {
+      try { var p = leave && document.fullscreenElement && leave.call(document); if (p && p.catch) p.catch(function () {}); } catch (e) {}
+    };
+    // (two fingers pinching, and a second tap, zoom nothing)
+    ["gesturestart", "gesturechange", "gestureend"].forEach(function (n) {
+      document.addEventListener(n, function (e) { e.preventDefault(); }, { passive: false });
+    });
+    // the screen stays on while the game is in front (a phone dims it when nothing is touched,
+    // which is what a run with the autopilot looks like to it)
+    var lock = null;
+    function awake() {
+      if (!slope_touch || lock || !navigator.wakeLock || document.visibilityState !== "visible") return;
+      navigator.wakeLock.request("screen").then(function (l) {
+        lock = l;
+        l.addEventListener("release", function () { lock = null; });
+      }).catch(function () {});
+    }
+    document.addEventListener("touchend", awake);
+    document.addEventListener("visibilitychange", awake);
+  })();
+</script>
 <!-- the loader that comes with the macroquad library (drawing, input, sound) -->
 <script>var register_plugin; // (the loader's network part, which the game does not use, expects this name to exist)</script>
 <script src="mq_js_bundle.js"></script>
@@ -36,6 +87,8 @@
           if (ext) gl.texParameterf(gl.TEXTURE_2D, ext.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(level, gl.getParameter(ext.MAX_TEXTURE_MAX_ANISOTROPY_EXT)));
         } catch (e) {}
       };
+      // (the game asks once, as it starts: fingers steer there, and its menus are made to their size)
+      importObject.env.slope_touch_device = function () { return slope_touch ? 1 : 0; };
       importObject.env.slope_store_get = function (key, keyLen, buf, cap) {
         try {
           const v = localStorage.getItem("slope:" + text(key, keyLen));
