@@ -7,6 +7,11 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="Slope">
+<!-- (put on a phone's home screen the game opens as an app, with the whole screen) -->
+<link rel="manifest" href="manifest.json">
+<link rel="icon" type="image/png" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-180.png">
 <title>Slope</title>
 <style>
   /* (a phone: the page does not scroll, bounce, zoom or select, and a held finger opens no menu) */
@@ -16,6 +21,13 @@
   canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; outline: none; background: #000; touch-action: none; }
   #loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
              color: #0f0; font: 20px/1.4 Consolas, "Courier New", monospace; text-align: center; }
+  /* (the box that asks for a file: a run to import, a picture for the custom skin) */
+  #chooser { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 5; display: flex;
+             flex-direction: column; gap: 14px; padding: 22px 26px; background: rgba(0, 8, 0, 0.97);
+             border: 3px solid #0f0; touch-action: manipulation; }
+  #chooser button { font: 18px/1.2 Consolas, "Courier New", monospace; color: #0f0; background: #021a02;
+                    border: 2px solid #0f0; padding: 14px 22px; cursor: pointer; white-space: nowrap; }
+  #chooser button:hover { background: #064006; }
 </style>
 </head>
 <body>
@@ -35,11 +47,18 @@
       try { Object.defineProperty(window, "devicePixelRatio", { get: function () { return dpr; }, configurable: true }); } catch (e) {}
     }
   })();
+  // A phone whose browser gives a page no full screen (an iPhone's), with the game open as a
+  // page and not from the home screen: the game says there how it gets the whole screen.
+  // (?ios=1 says so by hand.)
+  var slope_home_hint = false;
   // The game's FULLSCREEN button: not every phone's browser can do it (an iPhone's cannot), and
   // one that will not must not stop the game.
   (function () {
     var canvas = document.getElementById("glcanvas");
     var enter = canvas.requestFullscreen || canvas.webkitRequestFullscreen;
+    var media = function (q) { return !!window.matchMedia && window.matchMedia(q).matches; };
+    var as_app = navigator.standalone === true || media("(display-mode: standalone)") || media("(display-mode: fullscreen)");
+    slope_home_hint = /[?&]ios=1/.test(location.search) || (slope_touch && !enter && !as_app);
     canvas.requestFullscreen = function () {
       try { var p = enter && enter.call(canvas); if (p && p.catch) p.catch(function () {}); } catch (e) {}
     };
@@ -63,21 +82,150 @@
     }
     document.addEventListener("touchend", awake);
     document.addEventListener("visibilitychange", awake);
+    // Anti-aliasing (the settings): smooth edges or the original's jagged ones. A page can only
+    // say yes or no, when its picture is first made, so a change shows after the page is loaded
+    // again; how smooth is the browser's business.
+    var smooth = true;
+    try { smooth = JSON.parse(localStorage.getItem("slope:settings.json")).web_smooth !== false; } catch (e) {}
+    var context = canvas.getContext;
+    canvas.getContext = function (kind, wanted) {
+      var w = {};
+      for (var k in (wanted || {})) w[k] = wanted[k];
+      w.antialias = smooth;
+      return context.call(canvas, kind, w);
+    };
+  })();
+</script>
+<!-- frames -->
+<script>
+  // The FPS limit (the settings). The browser calls for a frame whenever the screen shows one;
+  // with a limit set, a call that comes before the next frame is due is passed on to the screen's
+  // next. So the game can be held below the screen's own rate (a phone with a fast screen lasts
+  // longer on 60 than on 120), never above it.
+  var slope_cap = 0;
+  (function () {
+    var ask = window.requestAnimationFrame.bind(window), drop = window.cancelAnimationFrame.bind(window);
+    var waiting = {}, last = 0, due = 0;
+    window.requestAnimationFrame = function (frame) {
+      var id = ++last;
+      function tick(t) {
+        if (slope_cap > 0 && t < due - 1.5) { waiting[id] = ask(tick); return; }
+        delete waiting[id];
+        if (slope_cap > 0) {
+          var every = 1000 / slope_cap;
+          // (far behind, as after the page was hidden: counted from now)
+          if (due < t - every) due = t;
+          due += every;
+        }
+        frame(t);
+      }
+      waiting[id] = ask(tick);
+      return id;
+    };
+    window.cancelAnimationFrame = function (id) {
+      if (waiting[id] !== undefined) { drop(waiting[id]); delete waiting[id]; }
+    };
   })();
 </script>
 <!-- the loader that comes with the macroquad library (drawing, input, sound) -->
 <script>var register_plugin; // (the loader's network part, which the game does not use, expects this name to exist)</script>
 <script src="mq_js_bundle.js"></script>
 <script>
-  // What the game keeps between visits (settings, high score): the browser's local storage.
-  // The game hands over text that sits in its own memory, as (address, length).
+  // A file from the visitor's device: a run to import, a picture for the custom skin. The game
+  // asks for one with a word of its own to know the answer by, and looks every frame whether it
+  // has come: the word, a line break, the file's name, a line break, the file.
+  var slope_picked = null;
+  function slope_choose(tag, pictures) {
+    var canvas = document.getElementById("glcanvas");
+    var old = document.getElementById("chooser");
+    if (old) old.remove();
+    var box = document.createElement("div");
+    box.id = "chooser";
+    var input = document.createElement("input");
+    input.type = "file";
+    input.style.display = "none";
+    // (a phone's file list greys out kinds it does not know: any file may be picked there)
+    if (pictures) input.accept = "image/*"; else if (!slope_touch) input.accept = ".sloperun";
+    var choose = document.createElement("button");
+    choose.textContent = pictures ? "CHOOSE A PICTURE" : "CHOOSE A RUN FILE";
+    var cancel = document.createElement("button");
+    cancel.textContent = "CANCEL";
+    function close() { box.remove(); canvas.focus(); }
+    function hand(name, bytes) {
+      var head = new TextEncoder().encode(tag + "\n" + String(name).replace(/[\r\n]/g, " ") + "\n");
+      var all = new Uint8Array(head.length + bytes.length);
+      all.set(head, 0);
+      all.set(bytes, head.length);
+      slope_picked = all;
+      close();
+    }
+    input.addEventListener("change", function () {
+      var file = input.files && input.files[0];
+      if (!file) { close(); return; }
+      var none = function () { hand(file.name, new Uint8Array(0)); };
+      if (!pictures) {
+        file.arrayBuffer().then(function (b) { hand(file.name, new Uint8Array(b)); }).catch(none);
+        return;
+      }
+      // a picture: whatever kind the browser can open, handed over as a PNG of no more than
+      // 512 pixels a side (the browser's storage is small, and the game's textures are too)
+      var url = URL.createObjectURL(file), img = new Image();
+      img.onload = function () {
+        try {
+          var s = Math.min(1, 512 / Math.max(img.naturalWidth, img.naturalHeight, 1));
+          var c = document.createElement("canvas");
+          c.width = Math.max(1, Math.round(img.naturalWidth * s));
+          c.height = Math.max(1, Math.round(img.naturalHeight * s));
+          c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+          c.toBlob(function (blob) {
+            if (!blob) { none(); return; }
+            blob.arrayBuffer().then(function (b) { hand(file.name, new Uint8Array(b)); }).catch(none);
+          }, "image/png");
+        } catch (e) { none(); }
+        URL.revokeObjectURL(url);
+      };
+      img.onerror = function () { URL.revokeObjectURL(url); none(); };
+      img.src = url;
+    });
+    input.addEventListener("cancel", close);
+    choose.addEventListener("click", function () { input.click(); });
+    cancel.addEventListener("click", close);
+    box.appendChild(choose);
+    box.appendChild(cancel);
+    box.appendChild(input);
+    document.body.appendChild(box);
+    // (where the browser lets a page open its file window without a press of the page's own
+    // button, it is open already; where not, the button is there)
+    try { input.click(); } catch (e) {}
+  }
+  // What the game keeps between visits (settings, high score, saved runs, the custom skin's
+  // pictures): the browser's local storage. The game hands over text that sits in its own
+  // memory, as (address, length); runs and pictures come as text too (base64).
   miniquad_add_plugin({
     name: "slope_store",
-    version: 1,
+    version: 2,
     register_plugin: function (importObject) {
       const text = (at, len) => new TextDecoder().decode(new Uint8Array(wasm_memory.buffer, at, len));
+      // (bytes into the game's memory, if there is room for them: how many there are)
+      const give = (bytes, buf, cap) => {
+        if (cap >= bytes.length && bytes.length > 0) new Uint8Array(wasm_memory.buffer, buf, bytes.length).set(bytes);
+        return bytes.length;
+      };
       importObject.env.slope_store_set = function (key, keyLen, value, valueLen) {
-        try { localStorage.setItem("slope:" + text(key, keyLen), text(value, valueLen)); } catch (e) {}
+        try { localStorage.setItem("slope:" + text(key, keyLen), text(value, valueLen)); return 1; } catch (e) { return 0; }
+      };
+      importObject.env.slope_store_remove = function (key, keyLen) {
+        try { localStorage.removeItem("slope:" + text(key, keyLen)); } catch (e) {}
+      };
+      importObject.env.slope_store_list = function (buf, cap) {
+        try {
+          const names = [];
+          for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            if (k && k.indexOf("slope:") === 0) names.push(k.slice(6));
+          }
+          return give(new TextEncoder().encode(names.join("\n")), buf, cap);
+        } catch (e) { return 0; }
       };
       // The floor is looked at almost edge-on: without this its lines blur to a green haze a few
       // cells away (anisotropic filtering for the texture that is bound, as the desktop game has it).
@@ -89,6 +237,8 @@
       };
       // (the game asks once, as it starts: fingers steer there, and its menus are made to their size)
       importObject.env.slope_touch_device = function () { return slope_touch ? 1 : 0; };
+      importObject.env.slope_home_hint = function () { return slope_home_hint ? 1 : 0; };
+      importObject.env.slope_frame_cap = function (fps) { slope_cap = fps > 0 ? fps : 0; };
       importObject.env.slope_store_get = function (key, keyLen, buf, cap) {
         try {
           const v = localStorage.getItem("slope:" + text(key, keyLen));
@@ -97,6 +247,31 @@
           if (cap >= bytes.length) new Uint8Array(wasm_memory.buffer, buf, bytes.length).set(bytes);
           return bytes.length;
         } catch (e) { return -1; }
+      };
+      // files in: the game asks for one, and takes it when it has come
+      importObject.env.slope_pick_file = function (tag, tagLen, pictures) {
+        try { slope_choose(text(tag, tagLen), pictures !== 0); } catch (e) {}
+      };
+      importObject.env.slope_picked_len = function () { return slope_picked ? slope_picked.length : -1; };
+      importObject.env.slope_picked_take = function (buf, cap) {
+        if (!slope_picked) return -1;
+        const n = give(slope_picked, buf, cap);
+        if (cap >= n) slope_picked = null;
+        return n;
+      };
+      // a file out: the browser saves it where it saves its downloads
+      importObject.env.slope_download = function (name, nameLen, data, dataLen) {
+        try {
+          const blob = new Blob([new Uint8Array(wasm_memory.buffer, data, dataLen).slice()], { type: "application/octet-stream" });
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(blob);
+          a.download = text(name, nameLen);
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(function () { URL.revokeObjectURL(a.href); }, 60000);
+          return 1;
+        } catch (e) { return 0; }
       };
     },
     on_init: function () {
