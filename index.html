@@ -279,6 +279,110 @@
       if (l) l.remove();
     }
   });
+  // Online play: the page holds the game's WebSocket to the multiplayer server (a page cannot
+  // open plain TCP connections). Each message is one text message of JSON. The game hands over
+  // the address and its messages as text in its memory, takes what came in one message at a
+  // time, and asks how the connection stands (0 connecting, 1 open, 2 failed, 3 closed).
+  // A page that came over https (GitHub Pages) can only open wss:// (TLS) connections: the
+  // server must then be behind TLS (a proxy with a certificate). ws:// works from http:// pages
+  // and from files on the computer.
+  miniquad_add_plugin({
+    name: "slope_net",
+    version: 1,
+    register_plugin: function (importObject) {
+      const conns = new Map();
+      let next = 1;
+      const text = (at, len) => new TextDecoder().decode(new Uint8Array(wasm_memory.buffer, at, len));
+      // "wss://..." as given (a TLS proxy: port 443 unless one is given); "ws://host" gets the
+      // game's port (7878, as on the desktop) unless it has one ("https://" / "http://" are
+      // taken as those); a bare "host[:port]": wss:// on a page that came over https, else ws://.
+      const address = (addr, port) => {
+        addr = addr.trim();
+        let scheme = location.protocol === "https:" ? "wss://" : "ws://";
+        const m = /^(wss?|https?):\/\//i.exec(addr);
+        if (m) {
+          scheme = /^(wss|https)$/i.test(m[1]) ? "wss://" : "ws://";
+          addr = addr.slice(m[0].length);
+        }
+        const cut = addr.indexOf("/");
+        let host = cut < 0 ? addr : addr.slice(0, cut);
+        const path = cut < 0 ? "" : addr.slice(cut);
+        if (host[0] !== "[" && host.indexOf(":") !== host.lastIndexOf(":")) host = "[" + host + "]"; // bare IPv6
+        if (scheme === "ws://" && !/:\d+$/.test(host)) host += ":" + port;
+        return scheme + host + path;
+      };
+      importObject.env.slope_net_open = function (addr, addrLen, port) {
+        const id = next++;
+        const c = { ws: null, state: 0, reason: "", inbox: [], outbox: [] };
+        conns.set(id, c);
+        const fail = (why) => { if (c.state < 2) { c.state = 2; c.reason = why; } };
+        let url = "";
+        try {
+          url = address(text(addr, addrLen), port);
+          c.ws = new WebSocket(url);
+        } catch (e) {
+          fail(location.protocol === "https:" && /^ws:/i.test(url)
+            ? "a page on https can only open wss:// (secure) connections"
+            : "bad server address " + url + " (" + e.message + ")");
+          return id;
+        }
+        c.ws.binaryType = "arraybuffer";
+        c.ws.onopen = function () {
+          if (c.state !== 0) return;
+          c.state = 1;
+          try { for (const m of c.outbox) c.ws.send(m); } catch (e) {}
+          c.outbox = [];
+        };
+        c.ws.onmessage = function (e) {
+          const bytes = typeof e.data === "string" ? new TextEncoder().encode(e.data) : new Uint8Array(e.data);
+          // (an empty message is no message: skipped, since recv's 0 means "none")
+          if (bytes.length > 0) c.inbox.push(bytes);
+        };
+        // (before the connection is open: it could not be made; after: the close decides)
+        c.ws.onerror = function () { if (c.state === 0) fail("cannot connect to " + url); };
+        c.ws.onclose = function (e) {
+          if (c.state === 0) fail("cannot connect to " + url);
+          else if (c.state === 1) {
+            if (e.wasClean || e.code === 1000 || e.code === 1001 || e.code === 1005) c.state = 3;
+            else fail("connection lost (" + e.code + (e.reason ? " " + e.reason : "") + ")");
+          }
+        };
+        return id;
+      };
+      importObject.env.slope_net_send = function (id, data, len) {
+        const c = conns.get(id);
+        if (!c || c.state > 1) return;
+        const m = text(data, len);
+        if (c.state === 0) { c.outbox.push(m); return; }
+        try { c.ws.send(m); } catch (e) {}
+      };
+      importObject.env.slope_net_status = function (id) {
+        const c = conns.get(id);
+        return c ? c.state : 3;
+      };
+      importObject.env.slope_net_reason = function (id, buf, cap) {
+        const c = conns.get(id);
+        const bytes = new TextEncoder().encode(c ? c.reason : "");
+        if (cap >= bytes.length && bytes.length > 0) new Uint8Array(wasm_memory.buffer, buf, bytes.length).set(bytes);
+        return bytes.length;
+      };
+      importObject.env.slope_net_recv = function (id, buf, cap) {
+        const c = conns.get(id);
+        if (!c || c.inbox.length === 0) return 0;
+        const bytes = c.inbox[0];
+        if (cap < bytes.length) return -bytes.length;
+        new Uint8Array(wasm_memory.buffer, buf, bytes.length).set(bytes);
+        c.inbox.shift();
+        return bytes.length;
+      };
+      importObject.env.slope_net_close = function (id) {
+        const c = conns.get(id);
+        if (!c) return;
+        conns.delete(id);
+        try { if (c.ws) c.ws.close(1000); } catch (e) {}
+      };
+    }
+  });
   load("slope.wasm");
 </script>
 </body>
