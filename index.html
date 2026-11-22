@@ -28,6 +28,16 @@
   #chooser button { font: 18px/1.2 Consolas, "Courier New", monospace; color: #0f0; background: #021a02;
                     border: 2px solid #0f0; padding: 14px 22px; cursor: pointer; white-space: nowrap; }
   #chooser button:hover { background: #064006; }
+  /* (files dragged over the page: what dropping them does) */
+  #drophint { position: absolute; left: 50%; top: 18px; transform: translateX(-50%); z-index: 6; pointer-events: none;
+              padding: 12px 20px; background: rgba(0, 8, 0, 0.92); border: 3px dashed #0f0; color: #0f0;
+              font: 17px/1.3 Consolas, "Courier New", monospace; text-align: center; max-width: 90%; }
+  /* (a phone: the page's own text box, laid over the game's while it is typed in; the game
+     draws the text, this one brings the keyboard, its paste and its selection) */
+  #ime { position: fixed; z-index: 4; display: none; box-sizing: border-box; margin: 0; padding: 0 6px; border: 0;
+         outline: none; background: transparent; color: transparent; caret-color: transparent;
+         font: 16px/1 monospace; -webkit-user-select: text; user-select: text; touch-action: manipulation;
+         -webkit-touch-callout: default; -webkit-tap-highlight-color: transparent; }
 </style>
 </head>
 <body>
@@ -131,10 +141,177 @@
 <script>var register_plugin; // (the loader's network part, which the game does not use, expects this name to exist)</script>
 <script src="mq_js_bundle.js"></script>
 <script>
+  // The game's sound. This takes the place of the drawing library's own (in mq_js_bundle.js),
+  // whose music stayed silent on an iPhone (and in Firefox on a phone): browsers let a page's
+  // sound start only in a press of the visitor's (their autoplay rules), and it tried that once,
+  // at the very first touch of the screen, which a phone does not count as a press (only the
+  // finger lifted is one), and then never again. (Chrome makes up for it by itself: it lets
+  // the sound start when the music is started after any press; Safari and Firefox do not.) It
+  // never woke the sound again after the phone had stopped it (a call, another app), and an
+  // iPhone's silent switch silenced it. Here every press, key and finger lifted tries until
+  // the sound runs, the music plays through the silent switch as a video's sound does, sounds
+  // the browser cannot read are given up instead of keeping the game waiting at its start, and
+  // everything goes through one volume.
+  var slope_audio = { ctx: null, master: null, buffers: new Map(), plays: new Map() };
+  (function () {
+    var A = slope_audio, Ctx = window.AudioContext || window.webkitAudioContext, nextBuffer = 1, nextPlay = 1;
+    function context() {
+      if (A.ctx || !Ctx) return A.ctx;
+      try { A.ctx = new Ctx(); } catch (e) { return null; }
+      A.master = A.ctx.createGain();
+      A.master.connect(A.ctx.destination);
+      // (an iPhone plays a page's sound as background noise that its silent switch turns off,
+      // unlike a video's: the game's music is played as a video's sound is)
+      // ("ambient": the music mixes with what other apps play (Spotify goes on) and follows the
+      // iPhone's silent switch, as game sounds should)
+      try { if (navigator.audioSession) navigator.audioSession.type = "ambient"; } catch (e) {}
+      return A.ctx;
+    }
+    function wake() {
+      var c = context();
+      if (!c || c.state === "running") return;
+      try { var p = c.resume(); if (p && p.catch) p.catch(function () {}); } catch (e) {}
+      // (an iPhone's: a sound started in the press itself)
+      try { var s = c.createBufferSource(); s.buffer = c.createBuffer(1, 1, 22050); s.connect(c.destination); s.start(0); } catch (e) {}
+    }
+    ["pointerdown", "pointerup", "mousedown", "touchstart", "touchend", "keydown", "click"].forEach(function (n) {
+      window.addEventListener(n, wake, { capture: true, passive: true });
+    });
+    document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible") wake(); });
+    function stop(id) {
+      var p = A.plays.get(id);
+      if (!p) return;
+      A.plays.delete(id);
+      try { p.src.onended = null; p.src.stop(); } catch (e) {}
+      try { p.src.disconnect(); p.gain.disconnect(); } catch (e) {}
+    }
+    miniquad_add_plugin({
+      name: "slope_audio",
+      version: 1,
+      register_plugin: function (importObject) {
+        var env = importObject.env;
+        env.audio_init = function () { context(); };
+        env.audio_add_buffer = function (at, len) {
+          var id = nextBuffer++, c = context();
+          if (!c) { A.buffers.set(id, null); return id; }
+          var bytes = wasm_memory.buffer.slice(at, at + len);
+          var done = false, put = function (b) { if (!done) { done = true; A.buffers.set(id, b); } };
+          try {
+            var p = c.decodeAudioData(bytes, put, function (e) { console.warn("a sound could not be read", e); put(null); });
+            if (p && p.catch) p.catch(function () { put(null); });
+          } catch (e) { put(null); }
+          return id;
+        };
+        env.audio_source_is_loaded = function (id) { return A.buffers.has(id); };
+        env.audio_play_buffer = function (id, volume, repeat) {
+          var pid = nextPlay++, c = context(), b = A.buffers.get(id);
+          if (!c || !b) return pid;
+          var src = c.createBufferSource(), gain = c.createGain();
+          src.buffer = b;
+          src.loop = !!repeat;
+          gain.gain.value = volume;
+          src.connect(gain);
+          gain.connect(A.master);
+          src.onended = function () { stop(pid); };
+          A.plays.set(pid, { sound: id, src: src, gain: gain });
+          try { src.start(0); } catch (e) { stop(pid); }
+          return pid;
+        };
+        env.audio_source_set_volume = function (id, volume) {
+          A.plays.forEach(function (p) { if (p.sound === id) p.gain.gain.value = volume; });
+        };
+        env.audio_source_stop = function (id) {
+          Array.from(A.plays.keys()).forEach(function (pid) { if (A.plays.get(pid).sound === id) stop(pid); });
+        };
+        env.audio_source_delete = function (id) { env.audio_source_stop(id); A.buffers.delete(id); };
+        env.audio_playback_stop = function (pid) { stop(pid); };
+        env.audio_playback_set_volume = function (pid, volume) { var p = A.plays.get(pid); if (p) p.gain.gain.value = volume; };
+      }
+    });
+  })();
+</script>
+<!-- videos of saved runs and recordings of runs (encoded by the browser, made into MP4 files) -->
+<script src="video.js"></script>
+<script>
   // A file from the visitor's device: a run to import, a picture for the custom skin. The game
   // asks for one with a word of its own to know the answer by, and looks every frame whether it
   // has come: the word, a line break, the file's name, a line break, the file.
   var slope_picked = null;
+  // A picture file (whatever kind the browser can open) as a PNG of no more than 512 pixels a
+  // side: the browser's storage is small, and the game's textures are too.
+  function slope_picture_png(file) {
+    return new Promise(function (ok, no) {
+      var url = URL.createObjectURL(file), img = new Image();
+      img.onload = function () {
+        try {
+          var s = Math.min(1, 512 / Math.max(img.naturalWidth, img.naturalHeight, 1));
+          var c = document.createElement("canvas");
+          c.width = Math.max(1, Math.round(img.naturalWidth * s));
+          c.height = Math.max(1, Math.round(img.naturalHeight * s));
+          c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+          c.toBlob(function (blob) {
+            if (!blob) { no(); return; }
+            blob.arrayBuffer().then(function (b) { ok(new Uint8Array(b)); }, no);
+          }, "image/png");
+        } catch (e) { no(e); }
+        URL.revokeObjectURL(url);
+      };
+      img.onerror = function () { URL.revokeObjectURL(url); no(); };
+      img.src = url;
+    });
+  }
+  // A file handed to the visitor: the browser saves it where it saves its downloads.
+  function slope_save_blob(name, blob) {
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 120000);
+  }
+  // Files dropped on the page (pictures for the custom skin, a run file to import): pictures are
+  // made PNGs as above, and every file waits for the game with its name and where it was
+  // dropped (in the canvas's pixels).
+  var slope_drops = [];
+  (function () {
+    var canvas = document.getElementById("glcanvas");
+    var hint = null;
+    var picture = function (f) { return /^image\//.test(f.type) || /\.(png|jpe?g|gif|webp|bmp|avif|svg|ico|tga)$/i.test(f.name); };
+    function show(on) {
+      if (on && !hint) {
+        hint = document.createElement("div");
+        hint.id = "drophint";
+        hint.textContent = "DROP: pictures go on the custom skin, a .sloperun file joins the saved runs";
+        document.body.appendChild(hint);
+      } else if (!on && hint) { hint.remove(); hint = null; }
+    }
+    var leaving = 0;
+    window.addEventListener("dragover", function (e) {
+      if (!e.dataTransfer || Array.prototype.indexOf.call(e.dataTransfer.types || [], "Files") < 0) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      e.dataTransfer.dropEffect = "copy";
+      show(true);
+      clearTimeout(leaving);
+      leaving = setTimeout(function () { show(false); }, 400);
+    }, true);
+    window.addEventListener("drop", function (e) {
+      show(false);
+      if (!e.dataTransfer || !e.dataTransfer.files || !e.dataTransfer.files.length) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      var r = canvas.getBoundingClientRect();
+      var x = (e.clientX - r.left) * canvas.width / Math.max(r.width, 1), y = (e.clientY - r.top) * canvas.height / Math.max(r.height, 1);
+      // (all of one drop together: the game takes them as one, for the rows they go to)
+      Promise.all(Array.prototype.map.call(e.dataTransfer.files, function (f) {
+        var put = function (b) { return { name: f.name, x: x, y: y, bytes: b }; };
+        var raw = function () { return f.arrayBuffer().then(function (b) { return put(new Uint8Array(b)); }, function () { return put(new Uint8Array(0)); }); };
+        return picture(f) ? slope_picture_png(f).then(put, raw) : raw();
+      })).then(function (all) { all.forEach(function (d) { slope_drops.push(d); }); });
+      canvas.focus();
+    }, true);
+  })();
   function slope_choose(tag, pictures) {
     var canvas = document.getElementById("glcanvas");
     var old = document.getElementById("chooser");
@@ -167,25 +344,7 @@
         file.arrayBuffer().then(function (b) { hand(file.name, new Uint8Array(b)); }).catch(none);
         return;
       }
-      // a picture: whatever kind the browser can open, handed over as a PNG of no more than
-      // 512 pixels a side (the browser's storage is small, and the game's textures are too)
-      var url = URL.createObjectURL(file), img = new Image();
-      img.onload = function () {
-        try {
-          var s = Math.min(1, 512 / Math.max(img.naturalWidth, img.naturalHeight, 1));
-          var c = document.createElement("canvas");
-          c.width = Math.max(1, Math.round(img.naturalWidth * s));
-          c.height = Math.max(1, Math.round(img.naturalHeight * s));
-          c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
-          c.toBlob(function (blob) {
-            if (!blob) { none(); return; }
-            blob.arrayBuffer().then(function (b) { hand(file.name, new Uint8Array(b)); }).catch(none);
-          }, "image/png");
-        } catch (e) { none(); }
-        URL.revokeObjectURL(url);
-      };
-      img.onerror = function () { URL.revokeObjectURL(url); none(); };
-      img.src = url;
+      slope_picture_png(file).then(function (b) { hand(file.name, b); }, none);
     });
     input.addEventListener("cancel", close);
     choose.addEventListener("click", function () { input.click(); });
@@ -239,6 +398,7 @@
       importObject.env.slope_touch_device = function () { return slope_touch ? 1 : 0; };
       importObject.env.slope_home_hint = function () { return slope_home_hint ? 1 : 0; };
       importObject.env.slope_frame_cap = function (fps) { slope_cap = fps > 0 ? fps : 0; };
+      importObject.env.slope_is_fullscreen = function () { return document.fullscreenElement || document.webkitFullscreenElement ? 1 : 0; };
       importObject.env.slope_store_get = function (key, keyLen, buf, cap) {
         try {
           const v = localStorage.getItem("slope:" + text(key, keyLen));
@@ -259,17 +419,29 @@
         if (cap >= n) slope_picked = null;
         return n;
       };
+      // files dropped on the page, one at a time: the name, a line break, "x y", a line break,
+      // the file's bytes
+      let dropping = null;
+      importObject.env.slope_drop_len = function () {
+        if (!dropping && slope_drops.length) {
+          const d = slope_drops.shift();
+          const head = new TextEncoder().encode(String(d.name).replace(/[\r\n]/g, " ") + "\n" + Math.round(d.x) + " " + Math.round(d.y) + "\n");
+          dropping = new Uint8Array(head.length + d.bytes.length);
+          dropping.set(head, 0);
+          dropping.set(d.bytes, head.length);
+        }
+        return dropping ? dropping.length : -1;
+      };
+      importObject.env.slope_drop_take = function (buf, cap) {
+        if (!dropping) return -1;
+        const n = give(dropping, buf, cap);
+        if (cap >= n) dropping = null;
+        return n;
+      };
       // a file out: the browser saves it where it saves its downloads
       importObject.env.slope_download = function (name, nameLen, data, dataLen) {
         try {
-          const blob = new Blob([new Uint8Array(wasm_memory.buffer, data, dataLen).slice()], { type: "application/octet-stream" });
-          const a = document.createElement("a");
-          a.href = URL.createObjectURL(blob);
-          a.download = text(name, nameLen);
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
-          setTimeout(function () { URL.revokeObjectURL(a.href); }, 60000);
+          slope_save_blob(text(name, nameLen), new Blob([new Uint8Array(wasm_memory.buffer, data, dataLen).slice()], { type: "application/octet-stream" }));
           return 1;
         } catch (e) { return 0; }
       };
@@ -383,6 +555,162 @@
       };
     }
   });
+  // Text boxes. The game draws its own and types in them itself; the page does what a game in
+  // a page cannot:
+  // - copy and cut: the browser asks the page for what to put on the clipboard (Ctrl+C, Ctrl+X),
+  //   and the page gives it what the game said is selected (a password's: nothing);
+  // - paste: the browser hands the page what is pasted (Ctrl+V), and the game takes it;
+  // - a phone: a real text box of the page is laid over the game's while it is typed in, so the
+  //   phone shows its keyboard and its own paste, selection and suggestions. It is put there in
+  //   the touch itself (a phone shows its keyboard for no other), on a box the game said is
+  //   there; what is typed in it goes to the game, which may change it back (only what the box
+  //   takes), and Enter or the keyboard put away is said too.
+  (function () {
+    var canvas = document.getElementById("glcanvas");
+    var focused = false, sel = "", pastes = [];
+    var ime = document.createElement("input");
+    ime.id = "ime";
+    ime.setAttribute("autocomplete", "off");
+    ime.setAttribute("autocorrect", "off");
+    ime.setAttribute("autocapitalize", "off");
+    ime.setAttribute("spellcheck", "false");
+    ime.setAttribute("enterkeyhint", "done");
+    document.body.appendChild(ime);
+    var imeOpen = false, imeEnter = false, imeClosed = false, closing = false, told = null;
+    var spots = new Map(), start = null;
+    var enc = new TextEncoder();
+    // (the game counts characters, the page UTF-16 units)
+    var units = function (s, chars) { return Array.from(s).slice(0, chars).join("").length; };
+    var chars = function (s, u) { return Array.from(s.slice(0, u)).length; };
+    function place(x, y, w, h) {
+      var r = canvas.getBoundingClientRect();
+      ime.style.left = (r.left + x) + "px";
+      ime.style.top = (r.top + y) + "px";
+      ime.style.width = Math.max(w, 1) + "px";
+      ime.style.height = Math.max(h, 1) + "px";
+    }
+    function select(at, anchor) {
+      var v = ime.value, a = units(v, at), b = units(v, anchor);
+      try { ime.setSelectionRange(Math.min(a, b), Math.max(a, b), a < b ? "backward" : "forward"); } catch (e) {}
+    }
+    function shut() {
+      closing = true;
+      imeOpen = false;
+      try { ime.blur(); } catch (e) {}
+      ime.style.display = "none";
+      closing = false;
+    }
+    window.addEventListener("copy", function (e) {
+      if (focused && sel && e.clipboardData) { e.clipboardData.setData("text/plain", sel); e.preventDefault(); e.stopImmediatePropagation(); }
+    }, true);
+    window.addEventListener("cut", function (e) {
+      if (focused && sel && e.clipboardData) { e.clipboardData.setData("text/plain", sel); e.preventDefault(); e.stopImmediatePropagation(); }
+    }, true);
+    window.addEventListener("paste", function (e) {
+      if (!focused || document.activeElement === ime) return;
+      var data = e.clipboardData || window.clipboardData;
+      var t = data ? data.getData("text") : "";
+      if (t) pastes.push(enc.encode(t));
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    }, true);
+    // a finger lifted on a text box the game drew (and did not slide off it): the page's box there
+    canvas.addEventListener("touchstart", function (e) {
+      var t = e.changedTouches[0];
+      start = t ? { x: t.clientX, y: t.clientY } : null;
+    }, { passive: true, capture: true });
+    canvas.addEventListener("touchend", function (e) {
+      var t = e.changedTouches[0];
+      if (!t || !start || Math.abs(t.clientX - start.x) > 10 || Math.abs(t.clientY - start.y) > 10) return;
+      var r = canvas.getBoundingClientRect(), x = t.clientX - r.left, y = t.clientY - r.top, now = performance.now();
+      spots.forEach(function (s) {
+        if (now - s.t < 400 && x >= s.x && x <= s.x + s.w && y >= s.y && y <= s.y + s.h) {
+          place(s.x, s.y, s.w, s.h);
+          ime.style.display = "block";
+          try { ime.focus({ preventScroll: true }); } catch (err) { ime.focus(); }
+          // (a box the game does not take up, one that cannot be changed now: put away again)
+          setTimeout(function () { if (!imeOpen) shut(); }, 600);
+        }
+      });
+    }, { passive: true, capture: true });
+    ime.addEventListener("keydown", function (e) {
+      if (e.key === "Enter") { imeEnter = true; e.preventDefault(); }
+      else if (e.key === "Escape") { ime.blur(); }
+    });
+    ime.addEventListener("blur", function () {
+      if (closing || !imeOpen) return;
+      imeClosed = true;
+      imeOpen = false;
+      ime.style.display = "none";
+    });
+    miniquad_add_plugin({
+      name: "slope_text",
+      version: 1,
+      register_plugin: function (importObject) {
+        const text = (at, len) => new TextDecoder().decode(new Uint8Array(wasm_memory.buffer, at, len));
+        const give = (bytes, buf, cap) => {
+          if (cap >= bytes.length && bytes.length > 0) new Uint8Array(wasm_memory.buffer, buf, bytes.length).set(bytes);
+          return bytes.length;
+        };
+        importObject.env.slope_paste_len = function () { return pastes.length ? pastes[0].length : -1; };
+        importObject.env.slope_paste_take = function (buf, cap) {
+          if (!pastes.length) return -1;
+          var n = give(pastes[0], buf, cap);
+          if (cap >= n) pastes.shift();
+          return n;
+        };
+        importObject.env.slope_text_selection = function (f, at, len) { focused = f !== 0; sel = text(at, len); };
+        importObject.env.slope_text_copy = function (at, len) {
+          var t = text(at, len);
+          try { if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t).catch(function () {}); } catch (e) {}
+        };
+        importObject.env.slope_ime_spot = function (lo, hi, x, y, w, h) {
+          spots.set(lo + ":" + hi, { x: x, y: y, w: w, h: h, t: performance.now() });
+        };
+        importObject.env.slope_ime_open = function (lo, hi, x, y, w, h, at, len, caret, anchor, mask, kind, kindLen) {
+          var k = text(kind, kindLen);
+          ime.type = mask ? "password" : "text";
+          ime.setAttribute("inputmode", k === "decimal" || k === "numeric" ? k : k === "url" ? "url" : "text");
+          ime.setAttribute("autocapitalize", k === "code" ? "characters" : "off");
+          ime.value = text(at, len);
+          place(x, y, w, h);
+          ime.style.display = "block";
+          imeOpen = true; imeEnter = false; imeClosed = false;
+          if (document.activeElement !== ime) { try { ime.focus({ preventScroll: true }); } catch (e) { ime.focus(); } }
+          select(caret, anchor);
+          told = null;
+        };
+        importObject.env.slope_ime_place = function (x, y, w, h) { if (imeOpen) place(x, y, w, h); };
+        importObject.env.slope_ime_set = function (at, len, caret, anchor) {
+          ime.value = text(at, len);
+          select(caret, anchor);
+        };
+        // what the page's box holds, when it has changed: "caret anchor flags\ntext"
+        // (flags: 1 Enter, 2 put away)
+        var pending = null;
+        importObject.env.slope_ime_len = function () {
+          if (!imeOpen && !imeClosed) return -1;
+          var v = ime.value, s = ime.selectionStart || 0, e = ime.selectionEnd || 0;
+          var back = ime.selectionDirection === "backward";
+          var at = chars(v, back ? s : e), anchor = chars(v, back ? e : s);
+          var flags = (imeEnter ? 1 : 0) | (imeClosed ? 2 : 0);
+          var now = at + " " + anchor + "\n" + v;
+          if (now === told && !flags) return -1;
+          told = now;
+          imeEnter = false; imeClosed = false;
+          pending = enc.encode(at + " " + anchor + " " + flags + "\n" + v);
+          return pending.length;
+        };
+        importObject.env.slope_ime_take = function (buf, cap) {
+          if (!pending) return -1;
+          var n = give(pending, buf, cap);
+          pending = null;
+          return n;
+        };
+        importObject.env.slope_ime_close = function () { if (imeOpen) shut(); };
+      }
+    });
+  })();
   load("slope.wasm");
 </script>
 </body>
