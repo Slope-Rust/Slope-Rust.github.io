@@ -141,6 +141,23 @@
 <script>var register_plugin; // (the loader's network part, which the game does not use, expects this name to exist)</script>
 <script src="mq_js_bundle.js"></script>
 <script>
+  // The mouse wheel, handed to the game in pixels whatever the browser counts in: Chrome and
+  // Edge count pixels (100 to a notch), Firefox often lines (3 to a notch), rarely pages. The
+  // library's own handler passed the number on as it came, so a notch scrolled the lists very
+  // differently from one browser to another. This one stands in front of it (it sees the wheel
+  // first, on its way down to the canvas, and stops it there).
+  (function () {
+    var canvas = document.getElementById("glcanvas");
+    window.addEventListener("wheel", function (e) {
+      if (e.target !== canvas || typeof wasm_exports === "undefined" || !wasm_exports) return;
+      var per = e.deltaMode === 1 ? 100 / 3 : e.deltaMode === 2 ? 300 : 1;
+      e.preventDefault();
+      e.stopPropagation();
+      wasm_exports.mouse_wheel(-e.deltaX * per, -e.deltaY * per);
+    }, { capture: true, passive: false });
+  })();
+</script>
+<script>
   // The game's sound. This takes the place of the drawing library's own (in mq_js_bundle.js),
   // whose music stayed silent on an iPhone (and in Firefox on a phone): browsers let a page's
   // sound start only in a press of the visitor's (their autoplay rules), and it tried that once,
